@@ -1,0 +1,35 @@
+{
+  "name": "dinner-bell-portfolio",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dinner Bell - a multi-dish meal scheduler that replans live as you cook, with a public dish gallery and shareable plans. Also ships a real Alexa+ MCP add-on.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1137.0",
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/ext-apps": "^2.0.0",
+    "@modelcontextprotocol/node": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.1"
+  },
+  "scripts": {
+    "dev": "npm run build:ui && tsx src/server/main.ts",
+    "start": "npm run build:ui && tsx src/server/main.ts",
+    "build:ui": "node scripts/build-ui.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm run test"
+  }
+}
