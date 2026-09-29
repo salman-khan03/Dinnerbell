@@ -1,5 +1,7 @@
 # 🔔 Dinner Bell
 
+[![CI](https://github.com/salman-khan03/Dinnerbell/actions/workflows/ci.yml/badge.svg)](https://github.com/salman-khan03/Dinnerbell/actions/workflows/ci.yml)
+
 **A kitchen conductor.** Dinner Bell plans a multi-dish meal — Thanksgiving, a Sunday roast, a Hanukkah dinner — so every dish is ready at the same moment, and re-plans instantly when the turkey runs long or a guest count changes. It's not a recipe app and not a timer app: it's a scheduler that understands ovens have two racks, gravy needs the turkey's drippings, and pie wants to be made the night before.
 
 This is the portfolio fork of a project originally built for the Alexa+ track of Amazon's Build, Ship, Shape hackathon (that submission lives at [`../dinner-bell`](../dinner-bell)). The scheduling engine, MCP server, and Alexa+ integration are unchanged; this fork adds a **first-party web app** — normal email/password accounts, a dashboard, a public dish gallery people can fork from, and shareable plan links — so the product stands on its own without an MCP client or a hackathon judge in the loop.
