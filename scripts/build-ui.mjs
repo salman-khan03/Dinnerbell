@@ -3,6 +3,7 @@
  *   dist/app/timeline.html   the MCP App served as the ui:// resource
  *   dist/sim/*               the Alexa+ simulator (index.html + app.js + app.css)
  */
+import { createHash } from 'node:crypto';
 import { build } from 'esbuild';
 import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -60,6 +61,11 @@ await build({
   legalComments: 'none',
   logLevel: 'warning',
 });
-cpSync(p('web/app/index.html'), p('dist/webapp/index.html'));
 cpSync(p('web/app/app.css'), p('dist/webapp/app.css'));
+// Stamp asset URLs with a content hash so a deploy is picked up immediately despite caching.
+const stamp = (file) => createHash('sha256').update(readFileSync(p('dist/webapp', file))).digest('hex').slice(0, 10);
+const indexHtml = readFileSync(p('web/app/index.html'), 'utf8')
+  .replace('/app.css"', `/app.css?v=${stamp('app.css')}"`)
+  .replace('/app.js"', `/app.js?v=${stamp('app.js')}"`);
+writeFileSync(p('dist/webapp/index.html'), indexHtml);
 console.log('built dist/webapp/*');

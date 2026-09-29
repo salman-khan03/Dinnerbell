@@ -21,9 +21,9 @@ const scripted = (answers: Record<string, string | number | boolean>): { ask: As
   return { ask, asked };
 };
 
-beforeEach(() => {
+beforeEach(async () => {
   clock = at(2026, 11, 24, 12) * 60_000;
-  store = new Store();
+  store = await Store.open();
   bell = new DinnerBell({ store, now: () => clock });
 });
 

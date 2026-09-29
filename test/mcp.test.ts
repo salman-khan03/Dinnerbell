@@ -13,7 +13,7 @@ interface Harness {
 
 /** A real MCP client talking to the real server over a linked in-memory transport (2025 wire era). */
 async function connect(opts: { elicitation?: boolean; answers?: Record<string, unknown>; action?: 'accept' | 'decline' } = {}): Promise<Harness & { store: Store }> {
-  const store = new Store();
+  const store = await Store.open();
   const clock = at(2026, 11, 24, 12) * 60_000;
   const bell = new DinnerBell({ store, now: () => clock });
   const server = createDinnerBellMcp({ bell, store, uiHtml: () => '<!doctype html><title>t</title>', allowAnonymous: true });

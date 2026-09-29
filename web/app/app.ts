@@ -19,7 +19,6 @@ const el = <K extends keyof HTMLElementTagNameMap>(tag: K, attrs: Record<string,
   for (const k of kids) if (k !== null) n.append(k);
   return n;
 };
-const esc = (s: string): string => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 const oneOf = <T extends string>(v: string, allowed: readonly T[], fb: T): T => ((allowed as readonly string[]).includes(v) ? (v as T) : fb);
 const root = $('#root');
 
@@ -30,14 +29,17 @@ interface Task {
 }
 interface Plan {
   plan_id: string; state: string; headline: string; guests: number; cooks: number; ovens: number;
-  timezone: string; now: string; serve_target_local: string; serve_target_day: string;
-  achievable_local: string; slack_minutes: number;
+  timezone: string; now: string; serve_target: string; serve_target_local: string; serve_target_day: string;
+  achievable: string; achievable_local: string; slack_minutes: number;
   dishes: { id: string; name: string; course: string }[]; tasks: Task[];
   ahead_of_time: { text: string; when: string | null }[]; warnings: string[];
   suggestions: { kind: string; message: string; saves_minutes: number | null }[];
 }
 interface Outcome { text: string; view?: Plan; data?: Record<string, unknown>; needsInput?: string[]; isError?: boolean }
-interface Me { signedIn: boolean; username?: string; household?: { name: string; kitchen: { cooks: number; ovens: number }; kitchenKnown: boolean } }
+interface Me {
+  signedIn: boolean; username?: string; guest?: boolean; guestExpiresAt?: string;
+  household?: { name: string; kitchen: { cooks: number; ovens: number }; kitchenKnown: boolean };
+}
 interface CatalogDish { id: string; name: string; course: string; cuisine: string; tags: string[] }
 interface Menu { id: string; name: string; occasion: string; dishes: string[] }
 interface MyDish { id: string; name: string; course: string; published: boolean }
@@ -61,12 +63,46 @@ let catalog: { dishes: CatalogDish[]; menus: Menu[] } = { dishes: [], menus: [] 
 let gallery: { dishes: GalleryDish[]; menus: Menu[] } = { dishes: [], menus: [] };
 let busy = false;
 let flash: { kind: 'ok' | 'err'; text: string } | null = null;
+/** True while the serve-time handle is being dragged: the DOM is being moved by hand, so don't re-render under it. */
+let dragging = false;
+let renderWhenDropped = false;
 
-type Route = 'home' | 'discover' | 'dishes' | 'new' | 'public';
+type Route = 'home' | 'discover' | 'dishes' | 'new' | 'public' | 'claim';
 function currentRoute(): Route {
   if (/^\/p\/[a-z0-9]+$/.test(location.pathname)) return 'public';
   const h = location.hash.replace(/^#\/?/, '');
-  return h === 'discover' ? 'discover' : h === 'dishes' ? 'dishes' : h === 'new' ? 'new' : 'home';
+  return h === 'discover' ? 'discover' : h === 'dishes' ? 'dishes' : h === 'new' ? 'new' : h === 'claim' ? 'claim' : 'home';
+}
+
+// ── live sync: the server pushes "plan changed" over SSE (from another tab, another device, or Alexa) ──
+let stream: EventSource | null = null;
+let streamUrl = '';
+let streamLive = false;
+function syncStream(url: string | null, onChange: () => void): void {
+  if ((url ?? '') === streamUrl) return;
+  stream?.close();
+  stream = null;
+  streamUrl = url ?? '';
+  streamLive = false;
+  if (!url || typeof EventSource === 'undefined') return;
+  const es = new EventSource(url);
+  es.onopen = () => {
+    if (!streamLive) {
+      streamLive = true;
+      if (!dragging) void render();
+    }
+  };
+  es.onerror = () => {
+    streamLive = false;
+  };
+  es.addEventListener('plan', () => onChange());
+  stream = es;
+}
+async function onPlanPushed(): Promise<void> {
+  if (busy) return; // this tab caused it; its own response already has the new plan
+  await loadPlan();
+  if (dragging) return void (renderWhenDropped = true);
+  if (currentRoute() === 'home') await render();
 }
 
 async function loadMe(): Promise<void> {
@@ -113,9 +149,11 @@ function header(): HTMLElement {
     linkTab('#/dishes', 'My dishes', currentRoute() === 'dishes'),
     linkTab('#/discover', 'Discover', currentRoute() === 'discover'),
   );
-  const userBit = me.signedIn
-    ? el('div', { class: 'user-chip' }, `${esc(me.username ?? '')}`, signOutBtn())
-    : el('div', { class: 'row' }, linkBtn('Sign in', '#/'));
+  const userBit = !me.signedIn
+    ? el('div', { class: 'row' }, linkBtn('Sign in', '#/'))
+    : me.guest
+      ? el('div', { class: 'user-chip' }, 'Guest', linkBtn('Keep my kitchen', '#/claim'), signOutBtn('Leave'))
+      : el('div', { class: 'user-chip' }, me.username ?? '', signOutBtn());
   return el(
     'header',
     { class: 'top' },
@@ -130,12 +168,14 @@ function linkTab(href: string, label: string, active: boolean): HTMLElement {
 function linkBtn(label: string, href: string): HTMLElement {
   return el('a', { href, class: 'btn primary' }, label);
 }
-function signOutBtn(): HTMLElement {
-  const b = el('button', { class: 'btn ghost' }, 'Sign out');
+function signOutBtn(label = 'Sign out'): HTMLElement {
+  const b = el('button', { class: 'btn ghost' }, label);
   b.addEventListener('click', async () => {
+    if (me.guest && !confirm('Leave the guest kitchen? Its plan and dishes will be deleted unless you keep it first.')) return;
     await api('/api/logout', { method: 'POST' });
     me = { signedIn: false };
     plan = undefined;
+    syncStream(null, () => {});
     location.hash = '';
     await boot();
   });
@@ -184,6 +224,18 @@ function landing(): HTMLElement {
   };
   draw();
 
+  const tryBtn = el('button', { type: 'button', class: 'btn primary' }, 'Try it now, no signup');
+  tryBtn.addEventListener('click', async () => {
+    tryBtn.setAttribute('disabled', 'true');
+    const r = await api<{ error?: string }>('/api/guest', { method: 'POST', body: { tz: Intl.DateTimeFormat().resolvedOptions().timeZone } });
+    if (r.status !== 200) {
+      tryBtn.removeAttribute('disabled');
+      return setFlash('err', r.data.error ?? 'Could not start a guest kitchen.');
+    }
+    location.hash = '#/new';
+    await boot();
+  });
+
   return el(
     'div',
     {},
@@ -192,7 +244,9 @@ function landing(): HTMLElement {
       { class: 'hero' },
       el('h1', {}, '🔔 Dinner Bell'),
       el('p', { class: 'lead' }, 'Plan a multi-dish meal so every dish lands hot at the same time — and watch it replan live, out loud, when the turkey runs long.'),
+      el('div', { class: 'try-now' }, tryBtn, el('span', { class: 'muted', style: 'font-size:13px' }, 'A guest kitchen lasts 24 hours. Keep it any time with a username.')),
     ),
+    el('div', { class: 'or-line' }, 'or sign in'),
     authCard,
     el(
       'div',
@@ -201,6 +255,50 @@ function landing(): HTMLElement {
       el('div', { class: 'card' }, el('b', {}, 'Replans as you cook'), el('div', { class: 'muted' }, `Say the turkey needs 20 more minutes and every downstream dish moves, instantly.`)),
       el('div', { class: 'card' }, el('b', {}, 'Build on other people’s dishes'), el('div', { class: 'muted' }, 'Browse the public gallery, fork a dish into your kitchen, make it yours.')),
     ),
+  );
+}
+
+// ── guest → real account ──
+function claimPage(): HTMLElement {
+  if (!me.guest) return el('div', { class: 'card claim-card' }, el('h2', {}, 'Already yours'), 'This kitchen is already saved to your account.', el('div', { style: 'margin-top:12px' }, linkBtn('Back to my kitchen', '#/')));
+  const username = el('input', { placeholder: 'yourname', autocomplete: 'username' }) as HTMLInputElement;
+  const password = el('input', { type: 'password', placeholder: 'at least 8 characters', autocomplete: 'new-password' }) as HTMLInputElement;
+  const err = el('div', {});
+  const submit = el('button', { class: 'btn primary block' }, 'Keep my kitchen');
+  const form = el(
+    'form',
+    { class: 'card claim-card' },
+    el('h2', {}, 'Keep this kitchen'),
+    el('p', { class: 'muted', style: 'margin-top:0' }, 'Your plan and dishes stay exactly as they are. You just get a login for them.'),
+    el('div', { class: 'field' }, el('label', {}, 'Username'), username),
+    el('div', { class: 'field' }, el('label', {}, 'Password'), password),
+    err,
+    submit,
+  );
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    submit.setAttribute('disabled', 'true');
+    const r = await api<{ error?: string }>('/api/claim', { method: 'POST', body: { username: username.value, password: password.value } });
+    if (r.status !== 200) {
+      err.replaceChildren(el('div', { class: 'err-box' }, r.data.error ?? 'Something went wrong.'));
+      submit.removeAttribute('disabled');
+      return;
+    }
+    location.hash = '';
+    await boot();
+    setFlash('ok', 'Saved. This kitchen is yours now.');
+  });
+  return form;
+}
+
+function guestBanner(): HTMLElement | null {
+  if (!me.guest) return null;
+  const hoursLeft = me.guestExpiresAt ? Math.max(0, Math.round((Date.parse(me.guestExpiresAt) - Date.now()) / 3_600_000)) : 24;
+  return el(
+    'div',
+    { class: 'card guest-banner' },
+    el('div', {}, el('b', {}, 'You’re in a guest kitchen'), el('span', { class: 'muted' }, `It’s deleted in about ${hoursLeft} ${hoursLeft === 1 ? 'hour' : 'hours'} unless you keep it.`)),
+    linkBtn('Keep my kitchen', '#/claim'),
   );
 }
 
@@ -265,11 +363,132 @@ function planForm(): HTMLElement {
   return form;
 }
 
+// ── the timeline chart, with a draggable serve time ──
+const MIN = 60_000;
+const SNAP = 5 * MIN;
+function gantt(p: Plan, onServeChange?: (iso: string) => Promise<void>): HTMLElement {
+  const tasks = p.tasks.filter((t) => !t.before_cooking_window);
+  const clock = new Intl.DateTimeFormat('en-US', { timeZone: p.timezone, hour: 'numeric', minute: '2-digit' });
+  const hourFmt = new Intl.DateTimeFormat('en-US', { timeZone: p.timezone, hour: 'numeric' });
+  const serve0 = Date.parse(p.serve_target);
+  const now = Date.parse(p.now);
+  const starts = tasks.map((t) => Date.parse(t.start));
+  const ends = tasks.map((t) => Date.parse(t.end));
+  const firstStart = Math.min(...starts, serve0);
+  // Show "now" only when cooking is close; otherwise hours of empty track squash the bars.
+  const from = now < firstStart && now > firstStart - 90 * MIN ? now : firstStart;
+  const t0 = Math.floor((from - 15 * MIN) / (15 * MIN)) * 15 * MIN;
+  // Leave room to the right so the serve time can be dragged later.
+  const t1 = Math.max(...ends, serve0, Date.parse(p.achievable)) + (onServeChange ? 120 : 45) * MIN;
+  const pct = (t: number): number => ((t - t0) / (t1 - t0)) * 100;
+  const color = (id: string) => PALETTE[Math.max(0, p.dishes.findIndex((d) => d.id === id)) % PALETTE.length];
+
+  const bars: { el: HTMLElement; start: number; end: number; movable: boolean }[] = [];
+  const rows = p.dishes
+    .map((d) => {
+      const mine = tasks.filter((t) => t.dish_id === d.id);
+      if (!mine.length) return null;
+      const track = el('div', { class: 'g-track' });
+      for (const t of mine) {
+        const start = Date.parse(t.start);
+        const end = Date.parse(t.end);
+        const bar = el('div', {
+          class: `g-bar ${t.status} ${t.attention === 'none' ? 'light' : ''}`,
+          style: `left:${pct(start)}%;width:${pct(end) - pct(start)}%;background:${color(d.id)};color:${color(d.id)}`,
+          title: `${t.dish}: ${t.step} (${t.start_local}–${t.end_local})`,
+        });
+        track.append(bar);
+        bars.push({ el: bar, start, end, movable: t.status === 'pending' });
+      }
+      return el('div', { class: 'g-row' }, el('div', { class: 'g-label', title: d.name }, d.name), track);
+    })
+    .filter((r): r is HTMLDivElement => r !== null);
+
+  const axis = el('div', { class: 'g-axis' });
+  // Long spans label every other hour; on phones (CSS) every other label is hidden again.
+  const every = (t1 - t0) / (60 * MIN) > 10 ? 2 : 1;
+  let n = 0;
+  for (let h = Math.ceil(t0 / (60 * MIN)) * 60 * MIN; h < t1; h += every * 60 * MIN) {
+    axis.append(el('span', { class: n++ % 2 ? 'odd' : '', style: `left:${pct(h)}%` }, hourFmt.format(h)));
+  }
+
+  const overlay = el('div', { class: 'g-overlay' });
+  if (now > t0 && now < t1) overlay.append(el('div', { class: 'g-now', style: `left:${pct(now)}%` }));
+  const serveLine = el('div', { class: 'g-serve', style: `left:${pct(serve0)}%` });
+  const handle = el('button', { type: 'button', class: 'g-handle', 'aria-label': `Serve time ${clock.format(serve0)}. Use arrow keys to move it by 5 minutes.` }, `🍽 ${clock.format(serve0)}`);
+  serveLine.append(handle);
+  overlay.append(serveLine);
+
+  const chart = el('div', { class: 'gantt' }, el('div', { class: 'g-row' }, el('div', {}), axis), ...rows, overlay);
+  if (!onServeChange) {
+    handle.setAttribute('disabled', 'true');
+    handle.style.cursor = 'default';
+    return chart;
+  }
+
+  // Everything still pending hangs off the serve time (it's a backward schedule), so
+  // sliding them with the handle is an honest preview. The server's replan on drop is the truth.
+  let serve = serve0;
+  const minServe = Math.ceil((now + 10 * MIN) / SNAP) * SNAP;
+  const preview = (next: number): void => {
+    serve = Math.min(t1, Math.max(minServe, next));
+    const shift = serve - serve0;
+    serveLine.style.left = `${pct(serve)}%`;
+    handle.textContent = `🍽 ${clock.format(serve)}`;
+    for (const b of bars) if (b.movable) b.el.style.left = `${pct(b.start + shift)}%`;
+  };
+  const commit = async (): Promise<void> => {
+    if (serve === serve0) return;
+    handle.setAttribute('disabled', 'true');
+    await onServeChange(new Date(serve).toISOString());
+  };
+
+  const timeAt = (clientX: number): number => {
+    const r = overlay.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (clientX - r.left) / r.width));
+    return Math.round((t0 + frac * (t1 - t0)) / SNAP) * SNAP;
+  };
+  handle.addEventListener('pointerdown', (e) => {
+    if (busy) return;
+    e.preventDefault();
+    handle.setPointerCapture(e.pointerId);
+    dragging = true;
+    chart.classList.add('dragging');
+  });
+  handle.addEventListener('pointermove', (e) => {
+    if (dragging && handle.hasPointerCapture(e.pointerId)) preview(timeAt(e.clientX));
+  });
+  const drop = async (e: PointerEvent): Promise<void> => {
+    if (!handle.hasPointerCapture(e.pointerId)) return;
+    handle.releasePointerCapture(e.pointerId);
+    chart.classList.remove('dragging');
+    dragging = false;
+    if (serve !== serve0) await commit();
+    else if (renderWhenDropped) {
+      renderWhenDropped = false;
+      await render();
+    }
+  };
+  handle.addEventListener('pointerup', (e) => void drop(e));
+  handle.addEventListener('pointercancel', (e) => void drop(e));
+
+  let keyTimer: ReturnType<typeof setTimeout> | undefined;
+  handle.addEventListener('keydown', (e) => {
+    const step = e.key === 'ArrowRight' ? SNAP : e.key === 'ArrowLeft' ? -SNAP : 0;
+    if (!step || busy) return;
+    e.preventDefault();
+    preview(serve + step * (e.shiftKey ? 3 : 1));
+    clearTimeout(keyTimer);
+    keyTimer = setTimeout(() => void commit(), 700);
+  });
+  return chart;
+}
+
 // ── dashboard (signed in, has an active plan) ──
 function dashboard(): HTMLElement {
   if (plan === undefined) return el('div', { class: 'card' }, 'Loading…');
   if (plan === null) {
-    return el('div', {}, el('div', { class: 'card' }, el('h2', {}, 'No meal planned yet'), el('p', { class: 'lead' }, 'Tell Dinner Bell what you’re cooking and when, and it’ll build a timeline that gets everything to the table together.'), el('a', { href: '#/new', class: 'btn primary' }, 'Plan a meal')));
+    return el('div', {}, guestBanner(), el('div', { class: 'card' }, el('h2', {}, 'No meal planned yet'), el('p', { class: 'lead' }, 'Tell Dinner Bell what you’re cooking and when, and it’ll build a timeline that gets everything to the table together.'), el('a', { href: '#/new', class: 'btn primary' }, 'Plan a meal')));
   }
   const p = plan;
   const color = (id: string) => PALETTE[Math.max(0, p.dishes.findIndex((d) => d.id === id)) % PALETTE.length];
@@ -326,6 +545,17 @@ function dashboard(): HTMLElement {
         ),
       )
     : null;
+
+  const moveServe = async (iso: string): Promise<void> => {
+    const hadFocus = document.activeElement?.classList.contains('g-handle');
+    busy = true;
+    const r = await api<Outcome>('/api/plan/change', { method: 'POST', body: { serve_at: iso } });
+    busy = false;
+    renderWhenDropped = false;
+    if (r.data.view) plan = r.data.view;
+    setFlash(r.data.isError || !r.data.view ? 'err' : 'ok', r.data.text);
+    if (hadFocus) ($('.g-handle') as HTMLElement | null)?.focus();
+  };
 
   const list = el(
     'div',
@@ -388,6 +618,7 @@ function dashboard(): HTMLElement {
   return el(
     'div',
     {},
+    guestBanner(),
     el(
       'div',
       { class: 'card' },
@@ -397,7 +628,14 @@ function dashboard(): HTMLElement {
     ),
     nextCard,
     runningCard,
-    el('div', { class: 'card' }, el('h2', {}, 'Full timeline'), list),
+    el(
+      'div',
+      { class: 'card' },
+      el('h2', {}, streamLive ? el('span', { class: 'live-dot', title: 'Live: updates from other devices appear here' }) : null, 'Timeline'),
+      gantt(p, moveServe),
+      el('div', { class: 'g-hint' }, 'Drag the 🍽 marker (or focus it and use ← →) to move dinner. Everything still to do replans around it.'),
+      el('details', { class: 'steps' }, el('summary', {}, 'Step by step'), list),
+    ),
     ahead,
     el('div', { class: 'card' }, el('h2', {}, 'Share'), shareRow),
     el('div', { style: 'text-align:right' }, endBtn),
@@ -458,7 +696,12 @@ function dishesPage(): HTMLElement {
           el('span', { class: 'name' }, d.name),
           el('span', { class: 'tag' }, d.course),
           btn(d.published ? 'Published ✓' : 'Publish', d.published ? 'ghost' : 'primary', async () => {
-            await api(`/api/dishes/${encodeURIComponent(d.id)}/${d.published ? 'unpublish' : 'publish'}`, { method: 'POST' });
+            const r = await api<Outcome>(`/api/dishes/${encodeURIComponent(d.id)}/${d.published ? 'unpublish' : 'publish'}`, { method: 'POST' });
+            if (r.status === 403) {
+              setFlash('err', r.data.text);
+              location.hash = '#/claim';
+              return;
+            }
             await loadMyDishes();
             render();
           }),
@@ -477,7 +720,7 @@ function discoverPage(): HTMLElement {
           'div',
           { class: 'card gallery-card' },
           el('div', { class: 'top-row' }, el('b', {}, d.name), el('span', { class: 'tag' }, d.course)),
-          el('div', { class: 'author' }, `by ${esc(d.author)}`),
+          el('div', { class: 'author' }, `by ${d.author}`),
           d.blurb ? el('div', { class: 'blurb' }, d.blurb) : null,
           el('div', { class: 'tag-row' }, el('span', { class: 'tag' }, d.cuisine), ...d.tags.slice(0, 2).map((t) => el('span', { class: 'tag' }, t))),
           btn('Fork into my kitchen', 'primary', async () => {
@@ -500,6 +743,9 @@ async function publicPlanPage(): Promise<HTMLElement> {
     return el('div', { class: 'card' }, el('h2', {}, 'This link isn’t available'), el('p', {}, 'The plan may have been unshared.'), el('a', { href: '/', class: 'btn primary' }, 'Plan your own meal'));
   }
   const p = r.data.view;
+  syncStream(`/api/public/${slug}/events`, () => {
+    if (!dragging) void render();
+  });
   const state = oneOf(p.state, ['on_track', 'tight', 'late', 'impossible'], 'tight');
   const color = (id: string) => PALETTE[Math.max(0, p.dishes.findIndex((d) => d.id === id)) % PALETTE.length];
   const list = p.tasks
@@ -512,11 +758,17 @@ async function publicPlanPage(): Promise<HTMLElement> {
     el(
       'div',
       { class: 'card' },
-      el('div', { class: 'muted' }, `Shared by ${esc(r.data.householdName)}`),
+      el('div', { class: 'muted' }, `Shared by ${r.data.householdName}`),
       el('div', { class: 'row', style: 'justify-content:space-between;align-items:center' }, el('h1', { style: 'margin:0' }, `Dinner at ${p.serve_target_local}`), el('span', { class: `chip ${state}` }, STATE_LABEL[state] ?? state)),
       el('div', { class: 'muted' }, `${p.serve_target_day} · ${p.guests} guests · ${p.dishes.length} dishes`),
     ),
-    el('div', { class: 'card' }, el('h2', {}, 'Timeline'), el('div', { class: 'timeline-list' }, ...list)),
+    el(
+      'div',
+      { class: 'card' },
+      el('h2', {}, streamLive ? el('span', { class: 'live-dot', title: 'Live: this updates as they cook' }) : null, 'Timeline'),
+      gantt(p),
+      el('details', { class: 'steps' }, el('summary', {}, 'Step by step'), el('div', { class: 'timeline-list' }, ...list)),
+    ),
     el('div', { class: 'card', style: 'text-align:center' }, el('p', { class: 'lead', style: 'margin:0 0 12px' }, 'Built with Dinner Bell.'), el('a', { href: '/', class: 'btn primary' }, 'Plan your own meal')),
   );
 }
@@ -537,13 +789,16 @@ async function render(): Promise<void> {
     return;
   }
   if (!me.signedIn) {
+    syncStream(null, () => {});
     root.replaceChildren(el('div', { class: 'shell' }, header(), flashEl, landing(), foot()));
     return;
   }
+  syncStream('/api/plan/events', () => void onPlanPushed());
   let body: HTMLElement;
   if (route === 'discover') body = discoverPage();
   else if (route === 'dishes') body = dishesPage();
   else if (route === 'new') body = planForm();
+  else if (route === 'claim') body = claimPage();
   else body = dashboard();
   root.replaceChildren(el('div', { class: 'shell' }, header(), flashEl, body, foot()));
 }

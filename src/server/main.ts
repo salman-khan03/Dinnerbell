@@ -7,11 +7,14 @@
  * Environment:
  *   PORT, HOST                 listen address (default 8787, 0.0.0.0)
  *   PUBLIC_URL                 canonical https origin, used as the OAuth issuer
- *   DATA_DIR                   where store.json lives ("" = in-memory)
+ *   DATABASE_URL                postgres://... — takes priority over DATA_DIR when set (use this
+ *                               on any host with an ephemeral filesystem, which is most free tiers)
+ *   DATA_DIR                   where store.json lives when there's no DATABASE_URL ("" = in-memory)
  *   ALLOW_ANONYMOUS=1          skip auth, shared demo household (local dev only)
  *   DEMO_LOGIN=1               "Try a demo kitchen" button on the sign-in page
  *   DEMO_CLOCK=1               honour x-dinner-bell-now so the simulator can fast-forward time
  *   ALEXA_CLIENT_ID / ALEXA_CLIENT_SECRET / ALEXA_REDIRECT_URIS   Alexa+ account linking client
+ *   TRUST_PROXY=1              behind a host's reverse proxy: rate-limit by X-Forwarded-For, not the proxy's IP
  *   ALLOWED_HOSTS, CORS_ORIGINS  comma separated
  *   BEDROCK_MODEL_ID, AWS_REGION   AWS Builder path: Bedrock picks the simulator's tool calls
  */
@@ -39,12 +42,16 @@ export interface StartOptions {
   port?: number;
   host?: string;
   publicUrl?: string;
+  /** postgres://... — wins over dataDir when set. */
+  databaseUrl?: string;
   dataDir?: string;
   allowAnonymous?: boolean;
   demoLogin?: boolean;
   demoClock?: boolean;
   clients?: OAuthClient[];
-  limits?: { demo?: number; login?: number };
+  limits?: { demo?: number; login?: number; webAuth?: number };
+  /** Take client IPs from X-Forwarded-For (set when running behind a host's reverse proxy). */
+  trustProxy?: boolean;
   allowedHosts?: string[];
   corsOrigins?: string[];
   extraRoutes?: (ctx: { store: Store; oauth: OAuthServer; bell: DinnerBell; baseUrl: () => string }) => ExtraRoute[];
@@ -80,7 +87,7 @@ function loadWebAppFile(name: string): string | undefined {
 
 export async function startServer(o: StartOptions = {}): Promise<Running> {
   const log = o.log ?? ((l) => console.log(l));
-  const store = await Store.open(o.dataDir ? path.join(o.dataDir, 'store.json') : undefined);
+  const store = await Store.open(o.databaseUrl || (o.dataDir ? path.join(o.dataDir, 'store.json') : undefined));
   const clock = createClock();
   const bell = new DinnerBell({ store, now: clock.now });
   const clients: OAuthClient[] = [...(o.clients ?? [])];
@@ -106,8 +113,17 @@ export async function startServer(o: StartOptions = {}): Promise<Running> {
 
   const orchestrator = o.orchestrator ?? createOrchestrator();
   const baseUrl = () => oauth.cfg.baseUrl;
+  const webApp = createWebAppRoutes({
+    store,
+    bell,
+    serveShell: loadWebAppFile,
+    secureCookies: !!o.publicUrl?.startsWith('https://'),
+    publicUrl: baseUrl,
+    trustProxy: o.trustProxy,
+    authLimit: o.limits?.webAuth,
+  });
   const extraRoutes = [
-    ...createWebAppRoutes({ store, bell, serveShell: loadWebAppFile, secureCookies: !!o.publicUrl?.startsWith('https://') }),
+    ...webApp.routes,
     ...(o.simulator === false ? [] : createSimRoutes({ distDir: path.join(ROOT, 'dist', 'sim'), clientId: SIMULATOR_CLIENT_ID, baseUrl, orchestrator })),
     ...(o.extraRoutes?.({ store, oauth, bell, baseUrl }) ?? []),
   ];
@@ -145,8 +161,9 @@ export async function startServer(o: StartOptions = {}): Promise<Running> {
     bell,
     orchestrator,
     close: async () => {
+      webApp.close();
       await app.close();
-      await store.flush();
+      await store.close();
     },
   };
 }
@@ -163,10 +180,12 @@ if (isMain) {
     port,
     host: env.HOST ?? '0.0.0.0',
     publicUrl: env.PUBLIC_URL?.replace(/\/$/, ''),
+    databaseUrl: env.DATABASE_URL || undefined,
     dataDir: dataDir || undefined,
     allowAnonymous: env.ALLOW_ANONYMOUS === undefined ? dev : flag('ALLOW_ANONYMOUS'),
     demoLogin: env.DEMO_LOGIN === undefined ? dev : flag('DEMO_LOGIN'),
     demoClock: env.DEMO_CLOCK === undefined ? dev : flag('DEMO_CLOCK'),
+    trustProxy: flag('TRUST_PROXY'),
     allowedHosts: csv(env.ALLOWED_HOSTS),
     corsOrigins: csv(env.CORS_ORIGINS),
   })
@@ -178,6 +197,7 @@ if (isMain) {
       console.log(`  Alexa+ simulator:     ${r.url}/sim`);
       console.log(`  orchestrator:         ${r.orchestrator.kind}${r.orchestrator.modelId ? ` (${r.orchestrator.modelId})` : ' (offline grammar — set BEDROCK_MODEL_ID for AWS Builder mode)'}`);
       console.log(`  anonymous demo mode:  ${flag('ALLOW_ANONYMOUS') || (env.ALLOW_ANONYMOUS === undefined && dev) ? 'ON (local dev only)' : 'off (OAuth required)'}`);
+      console.log(`  storage:              ${env.DATABASE_URL ? 'Postgres' : dataDir ? `file (${dataDir})` : 'in-memory (nothing persists)'}`);
       const stop = () => void r.close().then(() => process.exit(0));
       process.on('SIGINT', stop);
       process.on('SIGTERM', stop);

@@ -328,7 +328,7 @@ export class DinnerBell {
       else if (d.bufferDelta <= -15) text = `You've slipped a bit. Slack is down to ${s.bufferMin > 0 ? sayDuration(s.bufferMin) : 'nothing'}. ${text}`;
     }
     rec.baseline = s;
-    this.store.savePlan(rec);
+    this.store.savePlan(rec, { silent: true });
     return { text, view: this.viewOf(rec, s, text), data: { running: ag.running.length, start_now: ag.startNow.length } };
   }
 
@@ -369,6 +369,8 @@ export class DinnerBell {
     householdId: string,
     a: {
       serve_time?: string;
+      /** An exact ISO 8601 instant; wins over serve_time. Used by the draggable timeline. */
+      serve_at?: string;
       guests?: number;
       add_dishes?: string[];
       remove_dishes?: string[];
@@ -386,8 +388,9 @@ export class DinnerBell {
     const notes: string[] = [];
     const unknown: string[] = [];
 
-    if (a.serve_time) {
-      const m = parseWhen(a.serve_time, { nowMin: now, tz, prefer: 'pm' });
+    if (a.serve_at || a.serve_time) {
+      const exact = a.serve_at ? Date.parse(a.serve_at) : NaN;
+      const m = Number.isFinite(exact) ? Math.round(exact / 60_000) : a.serve_time ? parseWhen(a.serve_time, { nowMin: now, tz, prefer: 'pm' }) : undefined;
       if (!m || m <= now) return { text: `I didn't catch a usable time. Try something like 6 PM.`, needsInput: ['What time should dinner be ready?'] };
       input.serveAt = m;
       notes.push(`dinner at ${sayClock(m, tz)}`);
@@ -615,6 +618,7 @@ export class DinnerBell {
 
   setDishPublished(householdId: string, dishId: string, published: boolean): Outcome {
     if (published) {
+      if (this.store.household(householdId)?.guest) return { text: `Create an account to publish dishes to the gallery. Your guest kitchen comes with you.`, isError: true, data: { needs_account: true } };
       const ok = this.store.publishDish(householdId, dishId);
       if (!ok) return { text: `I couldn't find that dish in your kitchen.`, isError: true };
       return { text: `Published. Anyone can find and fork it from the gallery now.`, data: { dish_id: dishId, published: true } };

@@ -105,6 +105,54 @@ p.lead { color: var(--mut); font-size: 16px; max-width: 560px; }
 .gallery-card .blurb { font-size: 13.5px; color: var(--mut); flex: 1; }
 .tag-row { display: flex; gap: 5px; flex-wrap: wrap; }
 
+/* ── guest mode ── */
+.try-now { display: flex; flex-direction: column; align-items: center; gap: 8px; margin: 0 auto 26px; }
+.try-now .btn { font-size: 16px; padding: 13px 22px; }
+.or-line { text-align: center; color: var(--dim); font-size: 12.5px; margin: 0 auto 14px; }
+.guest-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; border-color: var(--accent); background: linear-gradient(90deg, rgba(251,146,60,0.14), transparent); }
+.guest-banner b { display: block; }
+.claim-card { max-width: 420px; margin: 0 auto; }
+
+/* ── draggable timeline ── */
+.gantt { position: relative; margin: 6px 0 4px; padding-top: 28px; user-select: none; --label: 120px; }
+.g-row { display: grid; grid-template-columns: var(--label) 1fr; align-items: center; min-height: 28px; }
+.g-label { font-size: 12.5px; font-weight: 600; color: var(--mut); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 10px; }
+.g-track { position: relative; height: 22px; border-bottom: 1px dashed var(--line); }
+.g-bar { position: absolute; top: 3px; height: 16px; border-radius: 6px; min-width: 4px; transition: left 0.35s cubic-bezier(.2,.8,.2,1), width 0.35s cubic-bezier(.2,.8,.2,1), opacity 0.2s; }
+.g-bar.done { opacity: 0.3; }
+.g-bar.running { box-shadow: 0 0 0 2px var(--fg), 0 0 14px currentColor; }
+.g-bar.light { opacity: 0.7; }
+.gantt.dragging .g-bar { transition: none; }
+.g-axis { height: 22px; position: relative; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.g-axis span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
+.g-overlay { position: absolute; top: 0; bottom: 0; left: var(--label); right: 0; pointer-events: none; }
+.g-now { position: absolute; top: 46px; bottom: 0; width: 0; border-left: 2px dotted var(--mut); }
+.g-now::before { content: 'now'; position: absolute; bottom: -15px; left: -11px; font-size: 10.5px; color: var(--mut); }
+.gantt { margin-bottom: 18px; }
+.g-serve { position: absolute; top: 0; bottom: 0; width: 0; border-left: 2px solid var(--accent); }
+.g-handle {
+  position: absolute; top: 0; left: 0; transform: translateX(-50%); pointer-events: auto; touch-action: none; cursor: ew-resize;
+  background: var(--accent); color: var(--accent-fg); border: 0; border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: 800;
+  white-space: nowrap; box-shadow: 0 4px 16px rgba(0,0,0,0.35); transition: transform 0.15s;
+}
+.g-handle:hover, .gantt.dragging .g-handle { transform: translateX(-50%) scale(1.08); }
+.g-handle:focus-visible { outline: 3px solid var(--fg); outline-offset: 2px; }
+.g-handle[disabled] { cursor: progress; opacity: 0.7; }
+.g-hint { font-size: 12px; color: var(--dim); margin-top: 6px; }
+.live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); margin-right: 6px; box-shadow: 0 0 0 0 var(--ok); animation: pulse 2s infinite; vertical-align: 1px; }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(74,222,128,0.6); } 70% { box-shadow: 0 0 0 7px rgba(74,222,128,0); } 100% { box-shadow: 0 0 0 0 rgba(74,222,128,0); } }
+details.steps summary { cursor: pointer; color: var(--mut); font-size: 13px; font-weight: 600; margin: 10px 0 8px; }
+@media (max-width: 600px) {
+  .gantt { --label: 78px; }
+  .g-axis span.odd { display: none; }
+  .timeline-row { grid-template-columns: 1fr; gap: 2px; }
+  .share-box { flex-wrap: wrap; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .g-bar, .g-handle { transition: none; }
+  .live-dot { animation: none; }
+}
+
 .spin { display: inline-block; width: 14px; height: 14px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: spin 0.7s linear infinite; vertical-align: -2px; margin-right: 6px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 footer.foot { text-align: center; color: var(--dim); font-size: 12.5px; padding: 30px 0; }
